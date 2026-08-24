@@ -1,0 +1,108 @@
+<!DOCTYPE html>
+<!--
+SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+SPDX-License-Identifier: Apache-2.0
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>USD Scene Editor</title>
+<link rel="stylesheet" href="/static/style.css">
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://unpkg.com/three@0.169.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.169.0/examples/jsm/"
+  }
+}
+</script>
+</head>
+<body>
+
+<header id="toolbar">
+  <span class="brand">USD&nbsp;Scene&nbsp;Editor</span>
+  <button data-act="new">New</button>
+  <button data-act="open">Open…</button>
+  <button data-act="save">Save</button>
+  <button data-act="saveas">Save As…</button>
+  <span class="sep"></span>
+  <button data-act="undo" id="btn-undo" disabled>Undo</button>
+  <button data-act="redo" id="btn-redo" disabled>Redo</button>
+  <span class="sep"></span>
+  <label class="inline">Edit target
+    <select id="edit-target"></select>
+  </label>
+  <span class="grow"></span>
+  <span id="stage-path" class="muted">untitled (in memory)</span>
+  <span id="dirty-dot" class="dot" hidden title="Unsaved changes"></span>
+</header>
+
+<main>
+  <!-- ---------------------------------------------------------- tree -->
+  <section id="panel-tree" class="panel">
+    <div class="panel-head">
+      <span>Scenegraph</span>
+      <span class="grow"></span>
+      <button data-act="add-prim" title="Add a child prim">＋</button>
+      <button data-act="delete-prim" title="Delete selected prim">－</button>
+    </div>
+    <div id="tree" class="scroll"></div>
+  </section>
+
+  <div class="gutter" data-resize="tree"></div>
+
+  <!-- ------------------------------------------------------ viewport -->
+  <section id="panel-view" class="panel">
+    <div id="viewport"></div>
+    <div id="view-overlay">
+      <span id="view-stats" class="muted"></span>
+      <span class="grow"></span>
+      <label class="inline"><input type="checkbox" id="opt-grid" checked> Grid</label>
+      <label class="inline"><input type="checkbox" id="opt-wire"> Wireframe</label>
+      <button data-act="frame" title="Frame selection (F)">Frame</button>
+    </div>
+    <div id="view-hint" class="muted">Left-drag orbit · right-drag pan · scroll zoom · F frame</div>
+  </section>
+
+  <div class="gutter" data-resize="inspector"></div>
+
+  <!-- ----------------------------------------------------- inspector -->
+  <section id="panel-inspect" class="panel">
+    <div class="panel-head"><span id="inspect-title">Inspector</span></div>
+    <div class="tabs" id="inspect-tabs">
+      <button class="tab active" data-tab="properties">Properties</button>
+      <button class="tab" data-tab="composition">Composition</button>
+    </div>
+    <div id="inspect-body" class="scroll"></div>
+  </section>
+</main>
+
+<!-- ------------------------------------------------------ bottom dock -->
+<div class="gutter horizontal" data-resize="dock"></div>
+<section id="dock" class="panel">
+  <div class="tabs" id="dock-tabs">
+    <button class="tab active" data-tab="usda">USDA source</button>
+    <button class="tab" data-tab="python">Python console</button>
+    <span class="grow"></span>
+    <span id="dock-tools"></span>
+  </div>
+  <div id="dock-body"></div>
+</section>
+
+<!-- ----------------------------------------------------------- modals -->
+<div id="modal-backdrop" hidden>
+  <div id="modal">
+    <div id="modal-title"></div>
+    <div id="modal-body"></div>
+    <div id="modal-actions">
+      <button data-modal="cancel">Cancel</button>
+      <button data-modal="ok" class="primary">OK</button>
+    </div>
+  </div>
+</div>
+
+<div id="toast" hidden></div>
+
+<script type="module" src="/static/app.js"></script>
+</body>
+</html>
