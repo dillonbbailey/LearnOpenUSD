@@ -40,6 +40,7 @@ from pathlib import Path
 
 import tornado.ioloop
 import tornado.web
+import tornado.websocket
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from usd_bridge import EditorError, EditorSession  # noqa: E402
@@ -245,6 +246,72 @@ class BrowseHandler(ApiHandler):
         }))
 
 
+class ChangeSocket(tornado.websocket.WebSocketHandler):
+    """Pushes USD change notices to every connected browser.
+
+    Keeps tabs in sync with each other and, more importantly, surfaces changes
+    the client never asked for -- a long-running Python console script, or an
+    edit made from a second window.
+    """
+
+    clients: set["ChangeSocket"] = set()
+
+    def open(self, *args) -> None:
+        ChangeSocket.clients.add(self)
+        # Tell the newcomer where the stage currently stands so it can decide
+        # whether its initial fetch is already stale.
+        try:
+            self.write_message(json.dumps(
+                {"type": "hello", "revision": SESSION.stage_info()["revision"]}))
+        except Exception:
+            pass
+
+    def on_close(self) -> None:
+        ChangeSocket.clients.discard(self)
+
+    def on_message(self, message) -> None:
+        """Only used as a keepalive ping; all real traffic goes over HTTP."""
+
+    @classmethod
+    def broadcast(cls, payload: dict) -> None:
+        message = json.dumps(payload)
+        for client in list(cls.clients):
+            try:
+                client.write_message(message)
+            except Exception:
+                cls.clients.discard(client)
+
+
+# The IOLoop is captured at startup so notice callbacks -- which fire on
+# whichever thread performed the edit -- can hop back onto it safely.
+MAIN_LOOP: tornado.ioloop.IOLoop | None = None
+_flush_scheduled = False
+DEBOUNCE_SECONDS = 0.05
+
+
+def _flush_changes() -> None:
+    global _flush_scheduled
+    _flush_scheduled = False
+    record = SESSION.drain_change()
+    if record:
+        ChangeSocket.broadcast({"type": "change", **record})
+
+
+def _schedule_flush() -> None:
+    """Coalesce a burst of notices into one broadcast."""
+    global _flush_scheduled
+    if _flush_scheduled:
+        return
+    _flush_scheduled = True
+    tornado.ioloop.IOLoop.current().call_later(DEBOUNCE_SECONDS, _flush_changes)
+
+
+def _on_stage_changed() -> None:
+    # add_callback is the thread-safe entry point into the loop.
+    if MAIN_LOOP is not None:
+        MAIN_LOOP.add_callback(_schedule_flush)
+
+
 class IndexHandler(tornado.web.RequestHandler):
     def get(self):
         self.set_header("Cache-Control", "no-store")
@@ -262,6 +329,7 @@ def make_app() -> tornado.web.Application:
             (r"/api/usda", UsdaHandler),
             (r"/api/python", PythonHandler),
             (r"/api/browse", BrowseHandler),
+            (r"/ws", ChangeSocket),
             (r"/static/(.*)", tornado.web.StaticFileHandler, {"path": str(STATIC)}),
         ],
         template_path=str(STATIC),
@@ -270,6 +338,7 @@ def make_app() -> tornado.web.Application:
 
 
 async def main() -> None:
+    global MAIN_LOOP
     parser = argparse.ArgumentParser(description="Browser-based USD scene editor.")
     parser.add_argument("--port", type=int, default=8000)
     parser.add_argument("--host", default="127.0.0.1",
@@ -279,6 +348,9 @@ async def main() -> None:
     parser.add_argument("--no-browser", action="store_true",
                         help="do not launch a browser window")
     args = parser.parse_args()
+
+    MAIN_LOOP = tornado.ioloop.IOLoop.current()
+    SESSION.on_change = _on_stage_changed
 
     if args.open_path:
         try:

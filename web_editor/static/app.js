@@ -30,6 +30,7 @@ const state = {
   usdaMode: 'root',
   history: [],
   historyIndex: 0,
+  revision: 0,
 };
 
 let viewport;
@@ -83,6 +84,7 @@ async function act(fn, { refreshViewport = true } = {}) {
 
 function applyStage(stage) {
   state.stage = stage;
+  state.revision = Math.max(state.revision, stage.revision ?? 0);
   $('#stage-path').textContent = stage.path || 'untitled (in memory)';
   $('#dirty-dot').hidden = !stage.dirty;
   $('#btn-undo').disabled = !stage.canUndo;
@@ -124,6 +126,85 @@ async function refreshGeometry() {
   } catch (err) {
     toast(`Viewport: ${err.message}`, true);
   }
+}
+
+// --------------------------------------------- USD change notices (push)
+
+/**
+ * The server relays `Usd.Notice.ObjectsChanged` over a websocket. Edits this
+ * client made are already applied by the time the notice lands, so anything at
+ * or below the revision we last saw is dropped -- what survives is a change we
+ * did not cause: another tab, or a script still running in the console.
+ */
+function connectChangeSocket() {
+  let socket;
+  let backoff = 500;
+
+  const connect = () => {
+    socket = new WebSocket(`ws://${location.host}/ws`);
+
+    socket.onopen = () => { backoff = 500; };
+
+    socket.onmessage = async (event) => {
+      let msg;
+      try { msg = JSON.parse(event.data); } catch { return; }
+      if (msg.type !== 'change') return;
+      if (msg.revision <= state.revision) return;   // our own edit, already applied
+      state.revision = msg.revision;
+      await applyExternalChange(msg);
+    };
+
+    socket.onclose = () => {
+      // The server going away shouldn't leave a silently stale UI.
+      setTimeout(connect, backoff);
+      backoff = Math.min(backoff * 2, 10000);
+    };
+    socket.onerror = () => socket.close();
+  };
+
+  connect();
+}
+
+async function applyExternalChange(msg) {
+  if (msg.resync) {
+    // Structure moved: prims added or removed, arcs or variants edited.
+    const data = await api('/api/stage');
+    applyStage(data.stage);
+    state.scenegraph = data.scenegraph;
+    renderTree();
+    // A resync can delete the selected prim out from under us.
+    if (state.selection && !findNode(state.scenegraph, state.selection)) {
+      await select(null);
+    }
+  } else {
+    const info = await api('/api/stage');
+    applyStage(info.stage);
+  }
+
+  await refreshGeometry();
+  await refreshDock();
+
+  // Only refetch the inspector when the change actually touched the selection.
+  if (state.selection) {
+    const touched = msg.truncated || msg.paths.some((raw) => {
+      // Notices name properties too ("/World/Ball.radius"); compare on the
+      // owning prim so an attribute edit still refreshes its inspector.
+      const p = raw.split('.')[0];
+      return state.selection === p
+        || state.selection.startsWith(p === '/' ? '/' : p + '/');
+    });
+    if (touched) await refreshDetail();
+  }
+}
+
+function findNode(node, path) {
+  if (!node) return null;
+  if (node.path === path) return node;
+  for (const child of node.children) {
+    const hit = findNode(child, path);
+    if (hit) return hit;
+  }
+  return null;
 }
 
 // --------------------------------------------------------------------- tree
@@ -175,6 +256,11 @@ function treeRows(node, depth) {
   row.style.paddingLeft = `${4 + depth * 14}px`;
   row.onclick = () => select(node.path);
   row.ondblclick = () => viewport.frame(node.path);
+  row.oncontextmenu = (e) => {
+    e.preventDefault();
+    select(node.path);
+    openContextMenu(e.clientX, e.clientY, node);
+  };
   rows.push(row);
 
   if (open) for (const kid of node.children) rows.push(...treeRows(kid, depth + 1));
@@ -190,6 +276,84 @@ async function select(path) {
   if (location.hash !== hash) history.replaceState(null, '', location.pathname + hash);
   await refreshDetail();
 }
+
+// ------------------------------------------------------------ context menu
+
+function closeContextMenu() {
+  $('#ctx-menu').hidden = true;
+}
+
+/**
+ * Right-click menu on a tree row. Its job is variant switching: each variant
+ * set becomes a group, each variant a checkable item. The full variant state
+ * rides along in the scenegraph payload, so this opens without a round trip.
+ */
+function openContextMenu(x, y, node) {
+  const menu = $('#ctx-menu');
+  const sets = node.variantSets || [];
+
+  const items = [el('div', { className: 'ctx-header' },
+    el('div', { textContent: node.name }),
+    el('div', { className: 'sub', textContent: node.type || '(typeless)' }))];
+
+  if (!sets.length) {
+    items.push(el('div', { className: 'ctx-item disabled', textContent: 'No variant sets' }));
+    if (!node.isInstanceProxy) {
+      const add = el('div', { className: 'ctx-item', textContent: '+ Add variant set…' });
+      add.onclick = () => { closeContextMenu(); promptVariantSet(node.path); };
+      items.push(add);
+    }
+  } else {
+    for (const vset of sets) {
+      items.push(el('div', { className: 'ctx-group', textContent: vset.name }));
+      for (const variant of vset.variants) {
+        const current = variant === vset.selection;
+        const item = el('div', { className: 'ctx-item' + (current ? ' current' : '') },
+          el('span', { className: 'check', textContent: current ? '✓' : '' }),
+          el('span', { textContent: variant }));
+        item.onclick = () => {
+          closeContextMenu();
+          if (current) return;   // already selected; nothing to author
+          act(() => post('/api/composition', {
+            action: 'setVariant', path: node.path, name: vset.name, variant,
+          })).then(() => toast(`${vset.name} → ${variant}`)).catch(() => {});
+        };
+        items.push(item);
+      }
+      // Clearing the selection lets the stage fall back to the authored default.
+      if (vset.selection) {
+        const clear = el('div', { className: 'ctx-item' },
+          el('span', { className: 'check' }),
+          el('span', { className: 'muted', textContent: 'Clear selection' }));
+        clear.onclick = () => {
+          closeContextMenu();
+          act(() => post('/api/composition', {
+            action: 'setVariant', path: node.path, name: vset.name, variant: '',
+          })).catch(() => {});
+        };
+        items.push(clear);
+      }
+    }
+    if (node.isInstanceProxy) {
+      items.push(el('div', { className: 'ctx-item disabled',
+        textContent: 'Instance proxy — edits go to the prototype' }));
+    }
+  }
+
+  menu.replaceChildren(...items);
+  menu.hidden = false;
+  // Measure once visible, then keep the whole menu on screen.
+  const rect = menu.getBoundingClientRect();
+  menu.style.left = `${Math.min(x, innerWidth - rect.width - 6)}px`;
+  menu.style.top = `${Math.max(6, Math.min(y, innerHeight - rect.height - 6))}px`;
+}
+
+document.addEventListener('pointerdown', (e) => {
+  if (!e.target.closest('#ctx-menu')) closeContextMenu();
+}, true);
+window.addEventListener('blur', closeContextMenu);
+window.addEventListener('resize', closeContextMenu);
+$('#tree').addEventListener('scroll', closeContextMenu);
 
 async function refreshDetail() {
   const body = $('#inspect-body');
@@ -706,7 +870,7 @@ for (const [id, key] of [['#inspect-tabs', 'inspectTab'], ['#dock-tabs', 'dockTa
 
 document.addEventListener('keydown', (e) => {
   const typing = ['INPUT', 'TEXTAREA', 'SELECT'].includes(e.target.tagName);
-  if (e.key === 'Escape') return closeModal();
+  if (e.key === 'Escape') { closeContextMenu(); return closeModal(); }
   if (typing) return;
   if (e.key === 'f' || e.key === 'F') viewport.frame(state.selection);
   if (e.key === 'Delete' || e.key === 'Backspace') actions['delete-prim']();
@@ -766,6 +930,7 @@ function initViewport() {
 }
 
 viewport = initViewport();
+connectChangeSocket();
 refreshAll()
   .then(async () => {
     const linked = decodeURIComponent(location.hash.slice(1));

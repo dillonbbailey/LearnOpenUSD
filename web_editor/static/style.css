@@ -273,6 +273,42 @@ pre.code, textarea.code {
 .browse-row:hover { background: var(--panel-2); }
 .browse-row .icon { color: var(--muted); width: 14px; }
 
+/* -------------------------------------------------------- context menu */
+
+#ctx-menu {
+  position: fixed; z-index: 70; min-width: 190px; max-width: 320px;
+  max-height: 70vh; overflow: auto; padding: 4px 0;
+  background: var(--panel-2); border: 1px solid var(--line);
+  border-radius: 5px; box-shadow: 0 6px 22px #000a;
+  font-size: 12.5px;
+}
+#ctx-menu[hidden] { display: none; }
+
+.ctx-header {
+  padding: 5px 12px 6px; margin-bottom: 3px;
+  border-bottom: 1px solid var(--line);
+  color: var(--text); font-weight: 600;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.ctx-header .sub { color: var(--muted); font-weight: 400; font-size: 11px; }
+
+.ctx-group {
+  padding: 6px 12px 2px; color: var(--muted);
+  font-size: 10px; text-transform: uppercase; letter-spacing: .5px;
+}
+
+.ctx-item {
+  display: flex; align-items: center; gap: 8px;
+  padding: 4px 12px; cursor: pointer; white-space: nowrap;
+}
+.ctx-item:hover { background: var(--accent-dim); color: #fff; }
+.ctx-item .check { width: 10px; flex: none; color: var(--accent); }
+.ctx-item:hover .check { color: #fff; }
+.ctx-item.current { color: var(--accent); }
+.ctx-item.current:hover { color: #fff; }
+.ctx-item.disabled { color: var(--muted); cursor: default; font-style: italic; }
+.ctx-item.disabled:hover { background: none; color: var(--muted); }
+
 #toast {
   position: fixed; bottom: 18px; left: 50%; transform: translateX(-50%);
   background: var(--panel-2); border: 1px solid var(--line);

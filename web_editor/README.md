@@ -60,10 +60,26 @@ needs network access. Everything else is local.
 - Add references, payloads, inherits, and specializes
 - Add sublayers to the root layer
 - Create variant sets and switch variant selections live
+- **Right-click any prim in the tree** for a variant menu: each variant set is a
+  group, the active variant is check-marked, and picking one switches it
+  immediately. Prims without variant sets get an "Add variant set…" shortcut.
 - **Prim stack** pane showing which layers contribute opinions, strongest first
 - Click any attribute name for its per-layer opinion stack — the winning opinion
   is marked, which makes "why is this value what it is?" answerable directly
 - Switch the **edit target** so authoring lands in the layer you choose
+
+**Live change notifications**
+- The server registers `Usd.Notice.ObjectsChanged` on the open stage and pushes
+  changes to the browser over a WebSocket, so the tree, viewport, inspector and
+  USDA pane redraw whenever the stage moves — not just when *you* moved it
+- Multiple tabs stay in sync; a long-running console script updates the view as
+  it authors; anything hitting the HTTP API from outside shows up too
+- Resynced paths (structure changed) rebuild the tree; info-only paths (a value
+  moved) skip it and just redraw geometry, matching USD's own distinction
+- Notices are coalesced over a 50 ms window, so one edit is one redraw
+- Each response carries a revision number, so a client ignores echoes of edits
+  it already applied
+- The socket reconnects with exponential backoff if the server restarts
 
 **Live USDA pane**
 - Root layer, any single layer in the stack, or the fully flattened composed
@@ -90,7 +106,7 @@ network, and do not put it behind a public reverse proxy.
 
 | File | Role |
 | --- | --- |
-| `server.py` | Tornado HTTP shell; one JSON route per operation |
+| `server.py` | Tornado HTTP shell; one JSON route per operation, plus `/ws` for change pushes |
 | `usd_bridge.py` | All `pxr` interaction: `EditorSession` owns the open stage |
 | `static/index.html` | Layout and three.js import map |
 | `static/app.js` | Tree, inspector, composition pane, USDA pane, console |
@@ -111,7 +127,9 @@ more predictable than a command log at this size.
 - **Point instancer prototypes** reuse geometry only when the prototype prim was
   itself drawn; otherwise instances render as unit boxes.
 - **No time slider.** Everything evaluates at the default time code.
-- **No live reload** if the file changes on disk underneath you.
+- **Change notices cover in-process edits only.** If another program rewrites
+  the file on disk, USD emits nothing until the layer is reloaded — there is no
+  filesystem watcher.
 - **Rename and delete** operate on the current edit target, so they fail on prims
   defined in a stronger or referenced layer. The error message says so.
 - Cameras and lights appear in the tree and inspector but draw no viewport gizmo.

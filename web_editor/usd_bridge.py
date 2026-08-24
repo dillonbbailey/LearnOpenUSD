@@ -186,6 +186,16 @@ class EditorSession:
         self.path: str | None = None
         self._undo: list[str] = []
         self._redo: list[str] = []
+
+        # Change tracking. `on_change` is a zero-arg callable the transport
+        # layer installs to learn that something moved; it is deliberately not
+        # a Tornado/websocket detail so this module stays framework-agnostic.
+        self.on_change = None
+        self._listeners: list = []
+        self._revision = 0
+        self._pending_resync = False
+        self._pending_paths: set[str] = set()
+
         self.new_stage()
 
     # -- lifecycle ---------------------------------------------------------
@@ -204,6 +214,7 @@ class EditorSession:
         self.path = None
         self._undo.clear()
         self._redo.clear()
+        self._watch_stage()
 
     def open(self, file_path: str) -> None:
         resolved = Path(file_path).expanduser().resolve()
@@ -216,6 +227,7 @@ class EditorSession:
         self.path = str(resolved)
         self._undo.clear()
         self._redo.clear()
+        self._watch_stage()
 
     def save(self, file_path: str | None = None) -> str:
         stage = self._require()
@@ -236,6 +248,75 @@ class EditorSession:
             self._undo, self._redo = undo, redo
         self.path = str(resolved)
         return self.path
+
+    # -- change notification -----------------------------------------------
+
+    def _watch_stage(self) -> None:
+        """(Re)subscribe to USD change notices for the current stage.
+
+        Called on every stage swap. Listener keys must be held, or Tf revokes
+        the subscription when they are garbage collected.
+        """
+        self._revoke()
+        if self.stage is None:
+            return
+        self._listeners = [
+            Tf.Notice.Register(Usd.Notice.ObjectsChanged,
+                               self._on_objects_changed, self.stage),
+            Tf.Notice.Register(Usd.Notice.StageEditTargetChanged,
+                               self._on_edit_target_changed, self.stage),
+        ]
+        # A new stage is itself a change: force a full client rebuild.
+        self._note_change(resync=True, paths=["/"])
+
+    def _revoke(self) -> None:
+        for key in self._listeners:
+            key.Revoke()
+        self._listeners = []
+
+    def _note_change(self, resync: bool, paths) -> None:
+        self._revision += 1
+        self._pending_resync = self._pending_resync or resync
+        self._pending_paths.update(paths)
+        if self.on_change is not None:
+            self.on_change()
+
+    def _on_objects_changed(self, notice, sender) -> None:
+        """USD's primary change notice.
+
+        Resynced paths mean the composed structure changed (prims added or
+        removed, arcs or variants edited) and the client must rebuild the tree.
+        Info-only paths mean an attribute value moved -- the tree is still
+        valid, but geometry may need redrawing (points, radius, xformOp, ...).
+        """
+        resynced = [str(p) for p in notice.GetResyncedPaths()]
+        info_only = [str(p) for p in notice.GetChangedInfoOnlyPaths()]
+        if not resynced and not info_only:
+            return
+        self._note_change(resync=bool(resynced), paths=resynced + info_only)
+
+    def _on_edit_target_changed(self, notice, sender) -> None:
+        self._note_change(resync=False, paths=[])
+
+    def drain_change(self) -> dict | None:
+        """Take the coalesced change record, or None if nothing is pending.
+
+        A single user edit can emit many notices; the transport calls this once
+        after a short debounce so the browser gets one redraw, not dozens.
+        """
+        if not self._pending_paths and not self._pending_resync:
+            return None
+        record = {
+            "revision": self._revision,
+            "resync": self._pending_resync,
+            # Cap the path list: a stage-wide resync can name thousands, and
+            # the client only needs them to decide whether to refetch detail.
+            "paths": sorted(self._pending_paths)[:200],
+            "truncated": len(self._pending_paths) > 200,
+        }
+        self._pending_resync = False
+        self._pending_paths.clear()
+        return record
 
     # -- undo --------------------------------------------------------------
 
@@ -278,6 +359,8 @@ class EditorSession:
             "canUndo": bool(self._undo),
             "canRedo": bool(self._redo),
             "editTarget": stage.GetEditTarget().GetLayer().identifier,
+            # Lets the client ignore pushed notices for edits it already applied.
+            "revision": self._revision,
             "layers": [
                 {"identifier": layer.identifier,
                  "display": Path(layer.identifier).name or layer.identifier,
@@ -291,7 +374,17 @@ class EditorSession:
         stage = self._require()
 
         def build(prim: Usd.Prim) -> dict:
-            variant_sets = prim.GetVariantSets().GetNames() if prim.IsValid() else []
+            # Full variant state travels with the tree so the right-click menu
+            # can be built instantly; only prims that have variant sets pay for it.
+            variant_sets = []
+            if prim.IsValid() and not prim.IsPseudoRoot():
+                for set_name in prim.GetVariantSets().GetNames():
+                    vset = prim.GetVariantSet(set_name)
+                    variant_sets.append({
+                        "name": set_name,
+                        "variants": list(vset.GetVariantNames()),
+                        "selection": vset.GetVariantSelection(),
+                    })
             node = {
                 "path": str(prim.GetPath()),
                 "name": prim.GetName(),
@@ -301,7 +394,7 @@ class EditorSession:
                 "instanceable": prim.IsInstanceable(),
                 "isInstanceProxy": prim.IsInstanceProxy(),
                 "kind": Usd.ModelAPI(prim).GetKind() or "",
-                "variantSets": list(variant_sets),
+                "variantSets": variant_sets,
                 "arcs": self._arc_summary(prim),
                 "children": [],
             }
