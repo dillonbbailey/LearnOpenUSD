@@ -527,7 +527,8 @@ class TestValueClipsNotebook:
         assert "clips = {" in text
         assert "assetPaths" in text and "primPath" in text and "active" in text
 
-    def test_cell_manifest_acts_as_a_filter(self, run_notebook):
+    def test_cell_manifest_acts_as_a_filter(self, run_notebook, capfd):
+        capfd.readouterr()
         nb = run_notebook(
             VALUE_CLIPS_NOTEBOOK,
             tags=VALUE_CLIPS_SETUP + ["value-clips-minimal", "value-clips-manifest"],
@@ -538,24 +539,72 @@ class TestValueClipsNotebook:
         # No manifest and a declaring manifest both resolve
         assert none_value == 0.0 and good_value == 0.0
         assert list(none_samples) == list(good_samples) != []
-        # A manifest that omits the attribute silently kills it
+        # The excluded attribute has no other source of values in this example.
         assert list(empty_samples) == []
         assert empty_value is None
+        assert capfd.readouterr().err == ""
 
-    def test_cell_required_fields_fail_silently(self, run_notebook):
+    def test_cell_required_fields_contribute_no_values(self, run_notebook, capfd):
+        capfd.readouterr()
         nb = run_notebook(
             VALUE_CLIPS_NOTEBOOK,
-            tags=VALUE_CLIPS_SETUP + ["value-clips-minimal", "value-clips-silent-failure"],
+            tags=VALUE_CLIPS_SETUP + ["value-clips-minimal", "value-clips-required-fields"],
         )
-        samples, value, stderr_len = nb.omission_results[None]
+        samples, value = nb.omission_results[None]
         assert list(samples) != [] and value == 0.0
 
-        # Each required field is genuinely required, and each failure is silent
+        # An incomplete clip set contributes no values to this custom attribute.
         for missing in ("assetPaths", "primPath", "active"):
-            samples, value, stderr_len = nb.omission_results[missing]
+            samples, value = nb.omission_results[missing]
             assert list(samples) == [], f"omitting {missing} should yield no samples"
             assert value is None, f"omitting {missing} should yield no value"
-            assert stderr_len == 0, f"omitting {missing} unexpectedly warned"
+        # Native OpenUSD diagnostics write to the file descriptor, not sys.stderr.
+        assert capfd.readouterr().err == ""
+        # The same incomplete clip set still permits a schema fallback to resolve.
+        assert nb.fallback_value == 2.0
+
+    def test_missing_clip_emits_native_warning(self, run_notebook, capfd):
+        from pxr import Sdf
+
+        nb = run_notebook(
+            VALUE_CLIPS_NOTEBOOK,
+            tags=VALUE_CLIPS_SETUP + ["value-clips-minimal"],
+        )
+        capfd.readouterr()
+        nb.api.SetClipAssetPaths([Sdf.AssetPath("./missing_clip.usda")])
+        nb.api.SetClipActive([(0, 0)])
+        assert nb.size.Get(0) is None
+        # A real missing-file warning confirms that native diagnostics are captured.
+        assert "missing_clip.usda" in capfd.readouterr().err
+
+    def test_template_clips_support_layer_offsets(self, tmp_path):
+        from pxr import Usd, Sdf
+
+        for frame in (1, 2):
+            clip = Usd.Stage.CreateNew(str(tmp_path / f"cache.{frame:03}.usda"))
+            value = clip.DefinePrim("/Cache").CreateAttribute("value", Sdf.ValueTypeNames.Double)
+            value.Set(float(frame), frame)
+            clip.GetRootLayer().Save()
+
+        source = Usd.Stage.CreateNew(str(tmp_path / "template.usda"))
+        prim = source.DefinePrim("/Cache")
+        prim.CreateAttribute("value", Sdf.ValueTypeNames.Double)
+        api = Usd.ClipsAPI(prim)
+        api.SetClipTemplateAssetPath("./cache.###.usda")
+        api.SetClipTemplateStartTime(1)
+        api.SetClipTemplateEndTime(2)
+        api.SetClipTemplateStride(1)
+        api.SetClipPrimPath("/Cache")
+        source.GetRootLayer().Save()
+
+        stage = Usd.Stage.CreateInMemory()
+        target = stage.DefinePrim("/Cache")
+        target.GetReferences().AddReference(
+            source.GetRootLayer().identifier, "/Cache", Sdf.LayerOffset(10, 2)
+        )
+        value = target.GetAttribute("value")
+        # Clip times 1 and 2 become stage times 12 and 14; interpolation still works.
+        assert [value.Get(time) for time in (12, 13, 14)] == [1.0, 1.5, 2.0]
 
     def test_cell_retiming_offsets(self, run_notebook):
         nb = run_notebook(
@@ -563,7 +612,7 @@ class TestValueClipsNotebook:
             tags=VALUE_CLIPS_SETUP + ["value-clips-minimal", "value-clips-retiming"],
         )
         r = nb.retiming_results
-        # All three cubes read the SAME clip layer and differ only in their times mapping
+        # All three cubes use the same clip layer with different time mappings.
         assert r[0] == (0.0, 0.0, 0.0)
         # FullSpeed finishes by frame 24; HalfSpeed is exactly half way there
         assert r[24][0] == 6.0

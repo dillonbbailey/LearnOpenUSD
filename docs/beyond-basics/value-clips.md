@@ -27,78 +27,64 @@ kernelspec:
 ---
 # Value Clips
 
-A simulation cache can run to thousands of frames, each written as its own file. You cannot reasonably make each one a {term}`sublayer <Sublayer>` — the {term}`layer stack <Layer Stack>` would be thousands of layers deep, and {term}`composition <Composition>` would have to resolve every one of them just to open the {term}`stage <Stage>`.
-
-{term}`Value clips <Value Clips>` are OpenUSD's answer. A clip set points a {term}`prim <Prim>` at a sequence of external layers and pulls {term}`time samples <Time Sample>` out of whichever one covers the requested {term}`time code <Time Code>`.
-
 ## What Are Value Clips?
 
-The key idea is that clips are **not a {term}`composition arc <Composition Arcs>`**. They bring in no prim structure, no {term}`metadata <Metadata>`, and no {term}`default values <Default Value>` — OpenUSD deliberately ignores all of that inside a clip for the sake of scalability. Clips participate only in {term}`value resolution <Value Resolution>`, supplying time-varying {term}`attribute <Attribute>` values and nothing else.
+{term}`Value clips <Value Clips>` let you assemble {term}`time-sampled <Time Sample>` attribute values from a sequence of external {term}`layers <Layer>`. They are useful for simulation caches and other large animation datasets, where each file may contain only a portion of the animation.
 
-That also places them precisely: as [Value Resolution](./value-resolution.md) covers, at a single site OpenUSD consults time samples, then {term}`animation splines <Animation Spline>`, then the default value, then value clips. A `default` authored at the same site wins over the clips beneath it.
+Clip layers are opened as their values are needed. This avoids adding every cache file to the {term}`layer stack <Layer Stack>` and processing those layers during {term}`composition <Composition>`. Using {term}`sublayers <Sublayer>` alone also does not join the samples: the strongest layer with time samples for an attribute supplies its animation.
 
-## The Three Pieces
+In this lesson, you will configure a clip set, reuse its animation with different timing, and check which attributes receive clip values.
 
-A working setup has three parts.
+## How Does It Work?
 
-**Clip layers** hold the animated data — flat time samples on a prim, nothing else. Every clip in a set uses the same prim name internally, and that name does **not** have to match the prim you are applying them to. That indirection is what lets one set of crowd animation drive many different character models.
+Value clips participate in {term}`value resolution <Value Resolution>`. They supply animated values for {term}`attributes <Attribute>` already defined on the {term}`stage <Stage>`, either through authored declarations or a schema. Clip layers do not introduce prim structure, {term}`metadata <Metadata>`, or {term}`default values <Default Value>` into the stage.
 
-**The manifest** is a small layer listing which attributes have animated data in the clips. OpenUSD reads it during value resolution so it does not have to open and inspect every clip file.
+As described in [Value Resolution](./value-resolution.md), OpenUSD checks time samples, then {term}`animation splines <Animation Spline>`, then defaults, then clips at a given location in the composition. A default authored at the same location takes precedence over clip values.
 
-**The clip set** is dictionary-valued metadata on the target prim tying the two together.
+### Clip Layers, Manifests, and Clip Sets
 
-```{note}
-Clip metadata lives in a `clips` dictionary keyed by clip set name, so one prim can carry several named clip sets. The Python API defaults to a set named `default`. Inside the dictionary the keys are `assetPaths`, `primPath`, `active`, `times`, and `manifestAssetPath` — without the `clip` prefix that the `Usd.ClipsAPI` method names use.
-```
+A value clip setup uses three related pieces:
 
-## Which Fields Are Required
+- **Clip layers** store the animated data. A shared prim path identifies the data to read in each clip. It can differ from the target {term}`prim <Prim>` path on the stage, allowing the same clip data to drive multiple prims.
+- **The manifest** declares which attributes have animation in the clips. OpenUSD uses it to determine whether an attribute can receive clip values without inspecting every clip file.
+- **The clip set** stores metadata on a prim that identifies the clip layers, their timing, and the manifest.
 
-This is worth being precise about, because getting it wrong produces no error at all.
+Clip metadata is stored in a `clips` dictionary keyed by clip set name. A prim can have multiple clip sets; the Python API uses a set named `default` unless you specify another name.
+
+## Working With Python
+
+Use `Usd.ClipsAPI(prim)` to configure a clip set. The following table lists the metadata fields for an explicit clip set, which specifies the clip files and their activation times directly. The API methods add a `Clip` prefix to these field names, as in `SetClipAssetPaths()`.
 
 | Field | Required? | Purpose |
 | --- | --- | --- |
-| `assetPaths` | **yes** | Ordered list of clip layers |
-| `primPath` | **yes** | Prim path to read inside the clips |
-| `active` | **yes** | `(stageTime, clipIndex)` pairs — which clip is live when |
-| `times` | no | `(stageTime, clipTime)` pairs for retiming; identity if omitted |
-| `manifestAssetPath` | no | Path to the manifest; generated in memory if omitted |
+| `assetPaths` | Yes | Ordered list of clip layers |
+| `primPath` | Yes | Prim path to read inside the clips |
+| `active` | Yes | `(stageTime, clipIndex)` pairs identifying when each clip is active |
+| `times` | No | `(stageTime, clipTime)` pairs for retiming; identity if omitted |
+| `manifestAssetPath` | No | Path to the manifest; generated in memory if omitted |
 
-```{caution}
-Omit any of the three required fields and the clip set contributes **nothing at all**: `GetTimeSamples()` returns `[]`, every `Get()` returns `None`, and OpenUSD writes **zero bytes to stderr**. There is no exception and no warning. If clips appear to do nothing, check that all three are authored before looking anywhere else.
-```
+### Declaring Attributes in a Manifest
 
-## The Manifest Is a Filter, Not Just an Index
+If you omit `manifestAssetPath`, OpenUSD generates a manifest by opening and inspecting the clip layers. For large clip sets, you can avoid this work at runtime by generating and saving a manifest with `Usd.ClipsAPI.GenerateClipManifest()` or the `usdstitchclips` command line tool, then setting `manifestAssetPath` to that file.
 
-The manifest is optional, but it does more than speed things up.
+An authored manifest determines which attributes can receive values from the clip set. It must declare each attribute you want to read, even if the clip files already contain samples for that attribute. A declaration such as `double size` is sufficient; the manifest does not need to duplicate the animation samples.
 
-Omit `manifestAssetPath` and OpenUSD generates the manifest in memory by opening and inspecting the clip layers — correct, but it pays that cost at runtime. Author one, and it becomes authoritative: **an attribute the manifest does not declare will not resolve from clips**, even when the clip layers plainly contain samples for it. An empty manifest silently disables every attribute in the set.
+### Retiming With `times`
 
-Generate one rather than hand-writing it, with `Usd.ClipsAPI.GenerateClipManifest()` or the `usdstitchclips` command line tool, then point `manifestAssetPath` at the result.
+The `active` field selects the clip to use at a given stage {term}`time code <Time Code>`. The `times` field maps that stage time to a time within the clip using `(stageTime, clipTime)` pairs. OpenUSD interpolates linearly between these pairs.
 
-```{note}
-Inside a manifest, `double size.timeSamples = {}` means "this attribute has time samples in the clips". That is the opposite of what the same text means in an ordinary layer, where an empty `timeSamples` block is treated as no authored opinion.
-```
-
-## Retiming With `times`
-
-`active` says *which* clip is live at a given stage time. `times` says *where inside that clip* to read, as a list of `(stageTime, clipTime)` pairs. OpenUSD interpolates between the pairs, so the mapping is a piecewise-linear curve from stage time to clip time.
-
-That one field is what lets a single cache drive many differently-timed instances. Leaving `times` out gives you the identity mapping, so stage time is fed to the clip unchanged and the clip's own sample times must already be in stage time.
+You can use this mapping to reuse animation at different speeds or with a delayed start. If you omit `times`, the mapping is identity: stage time is passed to the clip unchanged.
 
 | `times` | Effect |
 | --- | --- |
-| `[(0, 0), (24, 24)]` | Identity — plays at authored speed |
-| `[(0, 0), (48, 24)]` | Half speed — 24 frames of clip stretched over 48 |
+| `[(0, 0), (24, 24)]` | Plays at the authored speed |
+| `[(0, 0), (48, 24)]` | Stretches 24 frames of clip data across 48 stage frames |
 | `[(0, 0), (12, 0), (36, 24)]` | Holds for 12 frames, then plays |
 | `[(0, 24), (24, 0)]` | Plays in reverse |
 
-```{note}
-Retiming is only available on explicit clip sets. Template clips derive their timing from the file numbering and always use an identity mapping, which is the main reason to prefer the explicit form when you need offsets.
-```
+### Template Clips
 
-## Template Clips
-
-When clips are a numbered sequence — the normal case for a simulation cache — you can skip `assetPaths` and `active` entirely and describe the sequence with a pattern instead:
+For regularly numbered files, template metadata provides a compact way to specify a clip sequence. OpenUSD derives the asset paths and timing from the pattern, start time, end time, and stride:
 
 ```python
 api.SetClipTemplateAssetPath("./cache.###.usda")
@@ -108,29 +94,25 @@ api.SetClipTemplateStride(1)
 api.SetClipPrimPath("/Cache")
 ```
 
-The `#` characters are a minimum field width, so `cache.###.usda` matches `cache.001.usda`. The number in the filename *is* a stage time code, which means each clip's internal samples must be authored in stage time.
+The `#` characters specify the minimum padding width, so `cache.###.usda` selects names such as `cache.001.usda`. The generated timing uses an identity mapping in the layer's time coordinates, so the sample times inside each clip should match the numbered sequence.
 
-Template clips are more compact but less capable: they cannot scale, loop, or reverse, because there is no `times` mapping to express that. If a clip set authors both template and explicit fields, **the explicit fields win and the template ones are ignored**.
-
-```{caution}
-`GetClipTemplateStartTime()`, `GetClipTemplateEndTime()`, `GetClipTemplateStride()` and `GetClipTemplateActiveOffset()` return **uninitialized garbage** when the field has not been authored — a subnormal value like `6.27e-310`, with no exception and no way to tell it apart from a real number. Check `"templateStartTime" in api.GetClips()["default"]` before trusting them.
-```
+Use an explicit clip set when you need a custom `times` mapping, such as a hold or a loop. Template clips derive their mapping from the sequence, but you can still shift and scale their playback with {term}`layer offsets <Layer Offset>` on a reference or sublayer. See [Layer Offsets in the value clips documentation](https://openusd.org/release/api/_usd__page__value_clips.html#Usd_ValueClips_ClipValueResolution_LayerOffsets) for how offsets apply to both forms. If you author both template and explicit clip metadata, OpenUSD prefers the explicit form.
 
 ## Examples
 
 ```{tip}
-You can run these examples locally as Jupyter notebooks. See [How to Run Notebooks Locally](../jupyter-notebook-setup.md) for setup instructions.
+You can run these examples locally as Jupyter notebooks. See [How to Run Notebooks Locally](../jupyter-notebook-setup.md) for setup instructions. Run the examples in order; later examples reuse the clip files created in Example 1.
 ```
 
 +++ {"tags": ["remove-cell"]}
->**NOTE**: Before starting make sure to run the cell below. This will install the relevant OpenUSD libraries that will be used through this notebook.
+>**NOTE**: Run the following setup cell before starting the examples. It imports the display helper and prepares the directory and layer helpers used below.
 +++
 ```{code-cell}
 :tags: [remove-input]
 :test-tags: [value-clips-setup]
 import os
 
-from pxr import Gf, Usd, UsdGeom, Sdf
+from pxr import Sdf
 
 from lousd.utils.visualization import DisplayUSD
 
@@ -146,8 +128,8 @@ def asset_path(name):
 def fresh_layer(name):
     """Return an empty layer at this path, safe to call on a re-run.
 
-    Sdf.Layer.CreateNew refuses if the file exists on disk OR if a layer with
-    that identifier is already open, so handle both cases.
+    Reuse an open layer when possible and remove an existing file before
+    creating a new layer so repeated runs start with the same content.
     """
     path = asset_path(name)
     existing = Sdf.Layer.Find(path)
@@ -159,6 +141,19 @@ def fresh_layer(name):
     return Sdf.Layer.CreateNew(path)
 
 
+def sample(attr, times):
+    return {t: attr.Get(t) for t in times}
+```
+
+### Example 1: A Working Clip Set
+
+First, we create two clip layers, each with samples at local times 0 and 1. The `make_clip()` function authors a `size` attribute at `/Clip` and saves its samples to a file. The setup cell defines `fresh_layer()` to create an empty layer under `_assets/clips/`, including when you rerun the notebook.
+
+```{code-cell}
+:test-tags: [value-clips-minimal]
+from pxr import Usd, Sdf
+
+
 def make_clip(name, samples):
     """Write one clip layer holding time samples for /Clip.size."""
     layer = fresh_layer(name)
@@ -168,19 +163,13 @@ def make_clip(name, samples):
         attr.Set(value, time)
     layer.Save()
     return layer
-
-
-def sample(attr, times):
-    return {t: attr.Get(t) for t in times}
 ```
 
-### Example 1: A Working Clip Set
-
-Two clip layers, each holding samples at its own local times 0 and 1. The clip set makes the first active from stage time 0 and the second from stage time 2, and `times` maps each two-unit stage window onto the clip's local 0..1 range.
+Next, we declare the attribute on the target prim and configure the clip set. The first clip is active before stage time 2, and the second is active from time 2 onward. The `times` mapping maps stage times 0–1 to the first clip's local times 0–1 and stage times 2–3 to the second clip's local times 0–1.
 
 ```{code-cell}
 :test-tags: [value-clips-minimal]
-:emphasize-lines: 14-19
+:emphasize-lines: 13-18
 
 from pxr import Usd, Sdf
 
@@ -191,7 +180,7 @@ root = fresh_layer("root.usda")
 stage: Usd.Stage = Usd.Stage.Open(root)
 thing = stage.DefinePrim("/World/Thing", "Xform")
 
-# The attribute must be declared on the prim itself
+# Declare the attribute on the stage; clips supply its animated values
 size = thing.CreateAttribute("size", Sdf.ValueTypeNames.Double)
 
 api = Usd.ClipsAPI(thing)
@@ -207,108 +196,15 @@ print()
 print(root.ExportToString())
 ```
 
-The composed attribute behaves like ordinary animation — interpolation works between samples — but the values are coming out of two separate files that were never sublayered or referenced.
+You can query and interpolate the composed attribute as you would other animated attributes. Its time samples come from the two clip files, which are accessed during value resolution.
 
-### Example 2: The Manifest Decides What Resolves
+### Example 2: Retiming a Shared Clip
 
-The same clips, three times over: no manifest, a manifest that declares `size`, and a manifest that declares nothing.
-
-```{code-cell}
-:test-tags: [value-clips-manifest]
-:emphasize-lines: 20-22
-
-from pxr import Usd, Sdf
-
-# A manifest declaring size, and one declaring nothing at all
-good = fresh_layer("manifest_good.usda")
-mstage = Usd.Stage.Open(good)
-mstage.OverridePrim("/Clip").CreateAttribute("size", Sdf.ValueTypeNames.Double)
-good.Save()
-
-empty = fresh_layer("manifest_empty.usda")
-empty.Save()
-
-
-def build(manifest, tag):
-    layer = fresh_layer(f"root_{tag}.usda")
-    stage = Usd.Stage.Open(layer)
-    prim = stage.DefinePrim("/World/Thing", "Xform")
-    prim.CreateAttribute("size", Sdf.ValueTypeNames.Double)
-    api = Usd.ClipsAPI(prim)
-    api.SetClipAssetPaths([Sdf.AssetPath("./clip_a.usda"), Sdf.AssetPath("./clip_b.usda")])
-    api.SetClipPrimPath("/Clip")
-    api.SetClipActive([(0, 0), (2, 1)])
-    if manifest:
-        api.SetClipManifestAssetPath(Sdf.AssetPath(f"./{manifest}"))
-    # Return the stage, not the attribute: an attribute handle expires when the
-    # stage it came from is garbage collected.
-    return stage
-
-
-manifest_results = {}
-manifest_stages = {}
-for manifest, tag in ((None, "none"), ("manifest_good.usda", "good"), ("manifest_empty.usda", "empty")):
-    manifest_stages[tag] = build(manifest, tag)
-    attr = manifest_stages[tag].GetAttributeAtPath("/World/Thing.size")
-    manifest_results[tag] = (attr.GetTimeSamples(), attr.Get(0))
-    print(f"manifest={tag:6} samples={str(attr.GetTimeSamples()):22} value at 0 = {attr.Get(0)}")
-```
-
-No manifest works — OpenUSD inspects the clips itself. A manifest that declares `size` works. A manifest that declares nothing produces **no samples and no value**, with nothing written to stderr. The manifest is authoritative once you author one.
-
-### Example 3: Every Required Field Fails Silently
-
-Omitting each required field in turn, with stderr captured so you can see how much OpenUSD says about it.
-
-```{code-cell}
-:test-tags: [value-clips-silent-failure]
-:emphasize-lines: 26-27
-
-import contextlib
-import io
-
-from pxr import Usd, Sdf
-
-FIELDS = ["assetPaths", "primPath", "active"]
-
-
-def build_omitting(missing):
-    layer = fresh_layer(f"root_omit_{missing or 'nothing'}.usda")
-    stage = Usd.Stage.Open(layer)
-    prim = stage.DefinePrim("/World/Thing", "Xform")
-    prim.CreateAttribute("size", Sdf.ValueTypeNames.Double)
-    api = Usd.ClipsAPI(prim)
-    if missing != "assetPaths":
-        api.SetClipAssetPaths([Sdf.AssetPath("./clip_a.usda"), Sdf.AssetPath("./clip_b.usda")])
-    if missing != "primPath":
-        api.SetClipPrimPath("/Clip")
-    if missing != "active":
-        api.SetClipActive([(0, 0), (2, 1)])
-    return stage
-
-
-omission_results = {}
-omission_stages = {}
-for missing in [None] + FIELDS:
-    captured = io.StringIO()
-    with contextlib.redirect_stderr(captured):
-        omission_stages[missing] = build_omitting(missing)
-        attr = omission_stages[missing].GetAttributeAtPath("/World/Thing.size")
-        samples, value = attr.GetTimeSamples(), attr.Get(0)
-    omission_results[missing] = (samples, value, len(captured.getvalue()))
-    label = missing or "(nothing omitted)"
-    print(f"omit {label:18} samples={str(samples):22} value={str(value):6} stderr={len(captured.getvalue())} bytes")
-```
-
-Every failure is total and completely quiet. This is the single most common way a clip set goes wrong, and OpenUSD gives you nothing to go on.
-
-### Example 4: Seeing the Offsets
-
-Numbers only get you so far. Here three cubes read from **the same single clip layer** and differ only in their `times` mapping, so the retiming is visible directly.
+This example applies one animation clip to three cubes. Each cube uses a different `times` mapping so you can compare normal playback, half-speed playback, and a delayed start.
 
 ```{code-cell}
 :test-tags: [value-clips-retiming]
-:emphasize-lines: 24-26
+:emphasize-lines: 25-29
 
 from pxr import Gf, Usd, UsdGeom, Sdf
 
@@ -362,29 +258,138 @@ for frame in (0, 12, 24, 36, 48):
 DisplayUSD("_assets/clips/offsets.usda", show_usd_code=True)
 ```
 
-All three cubes are reading the identical clip. `FullSpeed` finishes its slide by frame 24, `HalfSpeed` takes twice as long because 24 frames of clip data are stretched across 48, and `Delayed` sits still for 12 frames because its mapping holds clip time at 0 before advancing.
+`FullSpeed` finishes moving by frame 24. `HalfSpeed` stretches the same motion across 48 frames. `Delayed` holds clip time at 0 for the first 12 frames, then plays the motion through frame 36. Each cube uses the same clip data; only the timing metadata changes.
 
 ```{note}
-The viewer flattens the stage before converting it for display, and flattening bakes resolved clip values into ordinary time samples. That is why clip-driven motion animates here with no extra work, unlike {term}`animation splines <Animation Spline>`, which need `bake_splines_for_display=True`.
+The viewer flattens the stage before converting it for display. Flattening converts resolved clip values to ordinary time samples, which the viewer can play back.
 ```
 
-## Failure Modes Worth Knowing
+### Example 3: Selecting Attributes With a Manifest
 
-| What you did | What you see |
+We now compare three configurations using the clips from Example 1: an automatically generated manifest, an authored manifest that declares `size`, and an empty manifest.
+
+```{code-cell}
+:test-tags: [value-clips-manifest]
+:emphasize-lines: 22-23
+
+from pxr import Usd, Sdf
+
+# A manifest declaring size, and one declaring nothing at all
+good = fresh_layer("manifest_good.usda")
+mstage = Usd.Stage.Open(good)
+mstage.OverridePrim("/Clip").CreateAttribute("size", Sdf.ValueTypeNames.Double)
+good.Save()
+
+empty = fresh_layer("manifest_empty.usda")
+empty.Save()
+
+
+def build(manifest, tag):
+    layer = fresh_layer(f"root_{tag}.usda")
+    stage = Usd.Stage.Open(layer)
+    prim = stage.DefinePrim("/World/Thing", "Xform")
+    prim.CreateAttribute("size", Sdf.ValueTypeNames.Double)
+    api = Usd.ClipsAPI(prim)
+    api.SetClipAssetPaths([Sdf.AssetPath("./clip_a.usda"), Sdf.AssetPath("./clip_b.usda")])
+    api.SetClipPrimPath("/Clip")
+    api.SetClipActive([(0, 0), (2, 1)])
+    if manifest:
+        api.SetClipManifestAssetPath(Sdf.AssetPath(f"./{manifest}"))
+    # Return the stage, not the attribute: an attribute handle expires when the
+    # stage it came from is garbage collected.
+    return stage
+
+
+manifest_results = {}
+manifest_stages = {}
+for manifest, tag in ((None, "none"), ("manifest_good.usda", "good"), ("manifest_empty.usda", "empty")):
+    manifest_stages[tag] = build(manifest, tag)
+    attr = manifest_stages[tag].GetAttributeAtPath("/World/Thing.size")
+    manifest_results[tag] = (attr.GetTimeSamples(), attr.Get(0))
+    print(f"manifest={tag:6} samples={str(attr.GetTimeSamples()):22} value at 0 = {attr.Get(0)}")
+```
+
+Both the generated manifest and the authored manifest that declares `size` allow the clip values to resolve. The empty manifest excludes `size` from the clip set. In this example, the attribute has no other value source, so it returns no time samples and `Get(0)` returns `None`.
+
+### Example 4: Checking Required Fields
+
+This example omits each required field in turn and queries the resulting attribute. Compare each result with the complete clip set to see whether it contributes values.
+
+```{code-cell}
+:test-tags: [value-clips-required-fields]
+:emphasize-lines: 11-17
+
+from pxr import Usd, Sdf
+
+FIELDS = ["assetPaths", "primPath", "active"]
+
+
+def build_omitting(missing):
+    layer = fresh_layer(f"root_omit_{missing or 'nothing'}.usda")
+    stage = Usd.Stage.Open(layer)
+    prim = stage.DefinePrim("/World/Thing", "Xform")
+    prim.CreateAttribute("size", Sdf.ValueTypeNames.Double)
+    api = Usd.ClipsAPI(prim)
+    if missing != "assetPaths":
+        api.SetClipAssetPaths([Sdf.AssetPath("./clip_a.usda"), Sdf.AssetPath("./clip_b.usda")])
+    if missing != "primPath":
+        api.SetClipPrimPath("/Clip")
+    if missing != "active":
+        api.SetClipActive([(0, 0), (2, 1)])
+    return stage
+
+
+omission_results = {}
+omission_stages = {}
+for missing in [None] + FIELDS:
+    omission_stages[missing] = build_omitting(missing)
+    attr = omission_stages[missing].GetAttributeAtPath("/World/Thing.size")
+    samples, value = attr.GetTimeSamples(), attr.Get(0)
+    omission_results[missing] = (samples, value)
+    label = missing or "(nothing omitted)"
+    print(f"omit {label:18} samples={str(samples):22} value={value}")
+```
+
+Omitting any required field prevents this clip set from contributing values. Because the attribute has no other value source, its sample list is empty and `Get(0)` returns `None`.
+
+Other value sources can still provide a result. For example, changing the prim's type to `Cube` makes the schema's fallback value for `size` available, even though the clip set is still missing `active`:
+
+```{code-cell}
+:test-tags: [value-clips-required-fields]
+from pxr import UsdGeom
+
+fallback_stage = omission_stages["active"]
+fallback_prim = fallback_stage.GetPrimAtPath("/World/Thing")
+fallback_prim.SetTypeName("Cube")
+fallback_value = UsdGeom.Cube(fallback_prim).GetSizeAttr().Get(0)
+print("size from the Cube schema fallback:", fallback_value)
+```
+
+## Troubleshooting Clip Values
+
+If the expected animation is missing, check the clip set's fields, manifest, and attribute declarations. The table below distinguishes a clip set contributing no values from an attribute having no resolved value at all.
+
+| Configuration | Result and next step |
 | --- | --- |
-| Omitted `assetPaths`, `primPath`, or `active` | No samples, no values, no message |
-| Authored a manifest that omits the attribute | Same — silent and total |
-| Did not declare the attribute on the prim | Values resolve at exact sample times, but **any interpolated time raises** "Unknown value type" |
-| Declared the attribute with the wrong type | Correct values at exact sample times, `None` everywhere in between, silently |
-| `primPath` points at a prim not in the clips | Silent — falls back to a default or schema fallback if one exists, otherwise `None` |
-| A clip file listed in `assetPaths` is missing | Warns on stderr, and only the times that clip served return `None` |
+| An explicit clip set omits `assetPaths`, `primPath`, or `active` | The clip set contributes no values. Check that all three fields are authored. |
+| The manifest omits an attribute | The clip set does not supply that attribute. Include its declaration or regenerate the manifest. |
+| The attribute is not defined on the composed stage | Clips do not create the attribute. Declare it on the stage or use a schema that defines it. |
+| The attribute type differs from the type in the clips | Interpolation may fail. Use matching attribute types in the stage and clip layers. |
+| `primPath` does not identify the data in the clips | The clip set does not supply the expected values. Check the path in the clip files. |
+| A file listed in `assetPaths` is missing | OpenUSD reports a warning. Check the file path and asset resolution. |
 
-The pattern is that structural mistakes are silent while missing files are not. When clips produce nothing, start by checking the three required fields and the manifest.
+When a clip set contributes no values, other sources, including authored values or schema fallbacks, can still resolve. In Example 4, the custom attribute returns `None` until the `Cube` schema provides a fallback.
+
+```{note}
+In tests with `usd-core` 25.11, omitting a required field or using an empty manifest produced no warning. Check the resolved values as well as diagnostics when troubleshooting.
+```
+
+```{note}
+In `usd-core` 25.11, the Python getters `GetClipTemplateStartTime()`, `GetClipTemplateEndTime()`, `GetClipTemplateStride()`, and `GetClipTemplateActiveOffset()` can return an uninitialized numeric value when the field is absent. This is an implementation issue in that version's [Python wrapper](https://github.com/PixarAnimationStudios/OpenUSD/blob/v25.11/pxr/usd/usd/wrapClipsAPI.cpp), rather than a meaningful default. Check for the field before reading it, for example with `"templateStartTime" in api.GetClips().get("default", {})`.
+```
 
 ## Key Takeaways
 
-Value clips let a prim source time-varying values from a sequence of external layers without those layers entering composition at all. They bring in values and nothing else — no prims, no metadata, no defaults — which is what makes them scale to caches that a layer stack could never hold.
+Value clips let you assemble animation from external layers while keeping prim and attribute definitions in the composed stage. A clip set identifies the data to read, its active intervals, and the mapping between stage time and clip time. Its manifest declares which attributes can receive clip values.
 
-Three things are worth carrying forward. **A clip set needs `assetPaths`, `primPath`, and `active`**, and omitting any one disables it without a word. **The manifest is a filter**: optional, but authoritative once authored, so an attribute it omits will not resolve. And **the attribute must be declared on the target prim**, or interpolated queries raise rather than return.
-
-For numbered sequences, template clips are the compact form, at the cost of retiming — and be wary of the template getters, which return uninitialized memory for fields you never authored.
+Use explicit clip metadata for custom timing and template metadata for regularly numbered sequences. Layer offsets can shift and scale either form. When expected clip values are missing, check the clip metadata and attribute declarations, and consider whether another source is providing the resolved value.
